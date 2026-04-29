@@ -1,0 +1,11 @@
+.env
+venv/
+*.xml
+__pycache__/
+*.pkl
+*.faiss
+hashes.txt
+prod.dtsConfig
+report.md
+data/PATT
+data/
