@@ -113,8 +113,8 @@ nmap XML input
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Jbuhrer/csc7644-final-project-buhrer.git
-cd csc7644-final-project-buhrer
+git clone https://github.com/Jbuhrer/csc7644-final-project-PenAgent-Buhrer.git
+cd csc7644-final-project-PenAgent-Buhrer
 ```
 
 ### 2. Create and activate a virtual environment
