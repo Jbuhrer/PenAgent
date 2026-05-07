@@ -4,7 +4,7 @@ main.py — PenAgent CLI Entry Point
 Orchestrates the full penetration testing pipeline:
     1. Parse nmap XML into structured target data
     2. Retrieve exploits via hybrid RAG + CVE lookup
-    3. Execute ReAct agent against each target
+    3. Execute agent against each target
     4. Generate consolidated professional report
     5. Optional interactive shell drop
 
@@ -190,9 +190,6 @@ def parse_findings_from_report(report_text: str) -> list:
     """
     Extract structured findings from the generated markdown report.
 
-    Splits on '## Finding' headers and pulls out title, CVSS score,
-    CVE reference, and host IP from each finding block.
-
     Args:
         report_text (str): Full markdown report text.
 
@@ -205,7 +202,7 @@ def parse_findings_from_report(report_text: str) -> list:
         if not block.strip().startswith("## Finding"):
             continue
         title_match = re.search(r'^## Finding\s+\d+\s*[-—]+\s*(.+)', block, re.MULTILINE)
-        cvss_match  = re.search(r'\|\s*\*?\*?CVSS[^|]*Score\*?\*?\s*\|\s*\*?\*?(\d+\.\d+)\*?\*?\s*\|', block, re.IGNORECASE)
+        cvss_match  = re.search(r'\|\s*\*?\*?CVSS[^|]*Score\*?\*?\s*\|\s*\*?\*?(\d+\.\d+)', block, re.IGNORECASE)
         cve_match   = re.search(r'\|\s*\*?\*?CVE\*?\*?\s*\|\s*(CVE-\d{4}-\d+)', block, re.IGNORECASE)
         host_match  = re.search(r'\|\s*\*?\*?Host\*?\*?\s*\|\s*(\d+\.\d+\.\d+\.\d+)', block, re.IGNORECASE)
 
@@ -232,17 +229,7 @@ def parse_findings_from_report(report_text: str) -> list:
 
 # ── Shell selector ────────────────────────────────────────────────────────────
 def drop_shell(targets: list, findings: list, shell_port: str = None):
-    """
-    Handle interactive shell drop for single or multiple targets.
-
-    For single targets, connects immediately. For multiple targets,
-    presents a selection menu.
-
-    Args:
-        targets (list): List of parsed target dicts.
-        findings (list): Parsed findings list (used to identify exploit used).
-        shell_port (str): Optional manually specified port override.
-    """
+    """Handle interactive shell drop for single or multiple targets."""
     if len(targets) == 1:
         _connect_shell(targets[0], findings, shell_port)
     else:
@@ -252,7 +239,6 @@ def drop_shell(targets: list, findings: list, shell_port: str = None):
             console.print(f"    [{i}] {t['ip']}")
         console.print("    [0] Skip")
         console.print()
-
         choice = input("  [?] Enter number: ").strip()
         if choice == "0" or not choice:
             status("Skipping shell.")
@@ -268,17 +254,7 @@ def drop_shell(targets: list, findings: list, shell_port: str = None):
 
 
 def _connect_shell(target: dict, findings: list, shell_port: str = None):
-    """
-    Connect to a shell on the target host via netcat.
-
-    Auto-detects common backdoor ports (1524 for Metasploitable2,
-    4444 for Meterpreter) or prompts the user if none are found.
-
-    Args:
-        target (dict): Target dict with 'ip' and 'services'.
-        findings (list): Findings list for webhook notification.
-        shell_port (str): Optional manually specified port override.
-    """
+    """Connect to a shell on the target host via netcat."""
     ip = target["ip"]
     open_ports = [str(svc["port"]) for svc in target.get("services", [])]
     exploit_used = findings[0]["title"] if findings else "unknown"
@@ -305,12 +281,7 @@ def _connect_shell(target: dict, findings: list, shell_port: str = None):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    """
-    Main entry point for PenAgent.
-
-    Parses CLI arguments, runs the appropriate mode (history, compare,
-    or full pipeline), and handles output and shell drop.
-    """
+    """Main entry point for PenAgent."""
     print_banner()
 
     p = argparse.ArgumentParser(
@@ -325,30 +296,18 @@ def main():
     p.add_argument("--compare",    nargs=2,             metavar=("REPORT_A", "REPORT_B"),
                                                         help="Diff two report files")
 
-    # ── Service scope flags ───────────────────────────────────────────────────
     scope = p.add_mutually_exclusive_group()
     scope.add_argument(
-        "--services",
-        nargs="+",
-        metavar="PORT",
-        help=(
-            "Target specific ports only, e.g. --services 21 445 3306\n"
-            "Agent will only investigate services on these ports."
-        ),
+        "--services", nargs="+", metavar="PORT",
+        help="Target specific ports only, e.g. --services 21 445 3306",
     )
     scope.add_argument(
-        "--full",
-        action="store_true",
-        help=(
-            "Investigate ALL discovered services (slowest, most thorough).\n"
-            "Warning: significantly increases API usage and runtime."
-        ),
+        "--full", action="store_true",
+        help="Investigate ALL discovered services (slowest, most thorough)",
     )
-    # Default (no flag) = priority mode: top 6 highest-value services only
 
     args = p.parse_args()
 
-    # ── Utility modes ─────────────────────────────────────────────────────────
     if args.history:
         print_history()
         return
@@ -361,16 +320,13 @@ def main():
         error("--scan is required unless using --history or --compare")
         return
 
-    # ── Determine service scope mode ──────────────────────────────────────────
+    # Determine service scope mode
     if args.full:
-        mode = "full"
-        ports = None
+        mode, ports = "full", None
     elif args.services:
-        mode = "targeted"
-        ports = [str(p) for p in args.services]
+        mode, ports = "targeted", [str(p) for p in args.services]
     else:
-        mode = "default"
-        ports = None
+        mode, ports = "default", None
 
     start = time.time()
 
@@ -380,13 +336,12 @@ def main():
     total_services = sum(len(t.get("services", [])) for t in targets)
     status(f"{len(targets)} host(s) found  |  {total_services} total services fingerprinted")
 
-    # Display mode info so user knows what's being investigated
     if mode == "default":
         status("Mode: DEFAULT — top 6 priority services per host")
     elif mode == "targeted":
         status(f"Mode: TARGETED — ports {', '.join(ports)}")
     elif mode == "full":
-        status(f"Mode: FULL — all {total_services} services (this will take a while)")
+        status(f"Mode: FULL — all {total_services} services")
 
     for t in targets:
         print_scan_header(t["ip"], args.scan)
@@ -396,7 +351,7 @@ def main():
     status("Knowledge base: 47,405 chunks indexed")
 
     # ── Phase 3: Execute ──────────────────────────────────────────────────────
-    print_phase(3, "EXECUTE", f"LangChain ReAct agent  →  Metasploit RPC  ({len(targets)} host(s))")
+    print_phase(3, "EXECUTE", f"Agent  →  Metasploit RPC  ({len(targets)} host(s))")
     agent_results = run_agent(targets, mode=mode, ports=ports)
     for ip in agent_results:
         success(f"Agent complete for {ip}")
