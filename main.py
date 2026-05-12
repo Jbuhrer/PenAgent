@@ -36,6 +36,8 @@ from banner import (
 )
 from parser import parse_nmap
 from agent import run_agent
+from recon import run_recon
+from scope import Scope, ScopeViolation, generate_scope_template
 from reporter import generate_report
 
 
@@ -288,7 +290,12 @@ def main():
         description="PenAgent - Autonomous Penetration Testing Agent",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    p.add_argument("--scan",       required=False,      help="Path to nmap XML file")
+    p.add_argument("--scan",       required=False,      help="Path to nmap XML scan file (static)")
+    p.add_argument("--target",     required=False,      help="Live target: IP, range, or CIDR e.g. 192.168.1.0/24")
+    p.add_argument("--scope",      default=None,        help="Path to scope.yaml for engagement scope enforcement")
+    p.add_argument("--stealth",    action="store_true", help="Slow scan timing (-T2) to avoid IDS detection")
+    p.add_argument("--init-scope", action="store_true", help="Generate a scope.yaml template and exit")
+    p.add_argument("--recon-dir",  default=None,        help="Directory to save intermediate recon XML files")
     p.add_argument("--output",     default="report.md", help="Output report filename (default: report.md)")
     p.add_argument("--shell",      action="store_true", help="Drop into interactive shell after exploitation")
     p.add_argument("--shell-port", default=None,        help="Manually specify shell port (overrides auto-detect)")
@@ -316,9 +323,25 @@ def main():
         compare_reports(args.compare[0], args.compare[1])
         return
 
-    if not args.scan:
-        error("--scan is required unless using --history or --compare")
+    if args.init_scope:
+        path = generate_scope_template("scope.yaml")
+        success(f"Scope template written to {path} — edit it before your engagement")
         return
+
+    if not args.scan and not args.target:
+        error("--scan or --target is required unless using --history, --compare, or --init-scope")
+        return
+
+    if args.scan and args.target:
+        error("--scan and --target are mutually exclusive. Use one or the other.")
+        return
+
+    # ── Load scope enforcement ─────────────────────────────────────────────────
+    scope = Scope(args.scope) if args.scope else Scope()
+    if args.scope:
+        status(f"Scope loaded: {args.scope}")
+        for line in scope.summary().splitlines():
+            status(line)
 
     # Determine service scope mode
     if args.full:
@@ -330,11 +353,43 @@ def main():
 
     start = time.time()
 
-    # ── Phase 1: Parse ────────────────────────────────────────────────────────
-    print_phase(1, "PARSE", f"Loading {args.scan}")
-    targets = parse_nmap(args.scan)
+    # ── Phase 1: Recon / Parse ─────────────────────────────────────────────────
+    if args.target:
+        print_phase(1, "RECON", f"Live recon against {args.target}")
+        try:
+            targets, final_xml = run_recon(
+                target=args.target,
+                stealth=args.stealth,
+                skip_vuln=True,
+                work_dir=args.recon_dir,
+            )
+        except RuntimeError as e:
+            error(str(e))
+            return
+
+        if not targets:
+            error("Recon found no live hosts. Check target is reachable and in scope.")
+            return
+
+        scan_label = args.target
+    else:
+        print_phase(1, "PARSE", f"Loading {args.scan}")
+        targets = parse_nmap(args.scan)
+        scan_label = args.scan
+
+    # ── Scope filtering ────────────────────────────────────────────────────────
+    if scope.enabled:
+        before = len(targets)
+        targets = scope.filter_targets(targets)
+        removed = before - len(targets)
+        if removed:
+            warn(f"Scope filter removed {removed} out-of-scope host(s)")
+        if not targets:
+            error("All targets are out of scope. Check your scope.yaml.")
+            return
+
     total_services = sum(len(t.get("services", [])) for t in targets)
-    status(f"{len(targets)} host(s) found  |  {total_services} total services fingerprinted")
+    status(f"{len(targets)} host(s) in scope  |  {total_services} total services fingerprinted")
 
     if mode == "default":
         status("Mode: DEFAULT — top 6 priority services per host")
@@ -344,7 +399,7 @@ def main():
         status(f"Mode: FULL — all {total_services} services")
 
     for t in targets:
-        print_scan_header(t["ip"], args.scan)
+        print_scan_header(t["ip"], scan_label)
 
     # ── Phase 2: Retrieve ─────────────────────────────────────────────────────
     print_phase(2, "RETRIEVE", "Querying RAG knowledge base + NVD CVE API")
@@ -355,6 +410,68 @@ def main():
     agent_results = run_agent(targets, mode=mode, ports=ports)
     for ip in agent_results:
         success(f"Agent complete for {ip}")
+
+    # ── Phase 3a: Web Application Agent ─────────────────────────────────────
+    web_results = {}
+    try:
+        from webagent import run_web_agent, detect_web_targets, web_findings_to_report_context
+        web_urls = detect_web_targets(targets)
+        if web_urls:
+            print_phase(3, "WEB", f"Web agent firing on {len(web_urls)} HTTP target(s)")
+            for web_url in web_urls:
+                status(f"Testing {web_url}")
+                web_findings = run_web_agent(web_url)
+                web_results[web_url] = web_findings
+                ctx = web_findings_to_report_context(web_findings)
+                # Inject into agent results for the matching host IP
+                parsed_ip = web_url.split("//")[-1].split(":")[0]
+                if parsed_ip in agent_results:
+                    agent_results[parsed_ip] += "\n\n" + ctx
+                else:
+                    agent_results[parsed_ip] = ctx
+                if web_findings.has_findings():
+                    success(f"Web agent complete — findings on {web_url}")
+                else:
+                    status(f"Web agent complete — no critical findings on {web_url}")
+        else:
+            status("Web agent: no HTTP/S services detected, skipping")
+    except Exception as e:
+        warn(f"Web agent skipped: {e}")
+
+    # ── Phase 3b: Post-Exploitation ───────────────────────────────────────────
+    postex_results = {}
+    try:
+        from postex import run_postex, postex_to_agent_context
+        from pymetasploit3.msfrpc import MsfRpcClient
+        import os as _os
+        msf = MsfRpcClient(
+            _os.getenv("MSF_PASSWORD"),
+            server=_os.getenv("MSF_HOST", "127.0.0.1"),
+            port=int(_os.getenv("MSF_PORT", 55553)),
+            ssl=False,
+        )
+        sessions = msf.sessions.list
+        if sessions:
+            status(f"Post-exploitation: {len(sessions)} active session(s) found")
+            for sid, sinfo in sessions.items():
+                ip = sinfo.get("target_host", "unknown")
+                try:
+                    shell = msf.sessions.session(sid)
+                    findings_postex = run_postex(shell, ip)
+                    postex_results[ip] = findings_postex
+                    # Inject postex context back into agent results
+                    ctx = postex_to_agent_context(findings_postex)
+                    if ip in agent_results:
+                        agent_results[ip] += "\n\n" + ctx
+                    else:
+                        agent_results[ip] = ctx
+                    success(f"Post-ex complete for {ip}")
+                except Exception as e:
+                    warn(f"Post-ex failed for session {sid}: {e}")
+        else:
+            status("Post-exploitation: no active sessions (skipping)")
+    except Exception as e:
+        status(f"Post-exploitation skipped: {e}")
 
     # ── Phase 4: Report ───────────────────────────────────────────────────────
     print_phase(4, "REPORT", f"Writing findings to {args.output}")

@@ -202,6 +202,11 @@ For each service:
 
 IMPORTANT: Stop immediately after a successful shell and summarize all findings."""
 
+    # ── Exploit selector setup ───────────────────────────────────────────────
+    from exploit_selector import parse_exploits_from_agent, present_exploit_menu
+    from tools.msf_exec import parse_and_run as _original_run
+    import json as _json
+
     messages = [{"role": "user", "content": user_message}]
     max_iterations = 25
 
@@ -243,6 +248,52 @@ IMPORTANT: Stop immediately after a successful shell and summarize all findings.
     return "Agent reached maximum iterations. Check partial findings in report."
 
 
+def run_agent_on_target_with_selection(target: dict, mode: str = "default", ports: list = None) -> str:
+    """
+    Wrapper around run_agent_on_target that adds exploit selection menu.
+    Runs the agent for reasoning only first, then presents exploit menu,
+    then executes selected exploits via Metasploit.
+    """
+    from exploit_selector import parse_exploits_from_agent, present_exploit_menu
+
+    ip = target.get("ip", "unknown")
+    os_hint = detect_os(target)
+
+    # Run agent in reasoning-only mode first (no Metasploit)
+    reasoning_output = run_agent_on_target(target, mode=mode, ports=ports)
+
+    # Parse exploit paths from agent reasoning
+    exploits = parse_exploits_from_agent(reasoning_output, ip, os_hint)
+
+    if not exploits:
+        return reasoning_output
+
+    # Present selection menu (auto if 1, menu if multiple)
+    selected = present_exploit_menu(exploits, ip)
+
+    if not selected:
+        return reasoning_output + "\n\nExploitation skipped by user."
+
+    # Execute selected exploits
+    results = [reasoning_output]
+    for exploit in selected:
+        from banner import status, success, warn
+        status(f"Executing: {exploit['description']} against {ip}")
+        json_input = {
+            "module":   exploit["module"],
+            "options":  exploit.get("options", {"RHOSTS": ip}),
+            "_os_hint": exploit.get("os_hint", os_hint),
+        }
+        import json
+        result = parse_and_run(json.dumps(json_input))
+        results.append(f"[Exploit: {exploit['description']}]\n{result}")
+        if "[+] EXPLOITED" in result:
+            success(f"Shell acquired via {exploit['description']}")
+            break
+
+    return "\n".join(results)
+
+
 def run_agent(targets: list, mode: str = "default", ports: list = None) -> dict:
     """
     Run the agent against each target host independently.
@@ -258,6 +309,6 @@ def run_agent(targets: list, mode: str = "default", ports: list = None) -> dict:
     results = {}
     for target in targets:
         ip = target.get("ip", "unknown")
-        results[ip] = run_agent_on_target(target, mode=mode, ports=ports)
+        results[ip] = run_agent_on_target_with_selection(target, mode=mode, ports=ports)
     return results
 
