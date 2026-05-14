@@ -18,3 +18,9 @@ prod.dtsConfig
 report.md
 scan.xml
 scan_multi.xml
+nikto_*.txt
+report_live.md
+report.m
+scope.yaml
+*.xml
+/tmp/
