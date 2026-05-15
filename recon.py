@@ -63,7 +63,8 @@ def run_recon(
     target: str,
     stealth: bool = False,
     skip_vuln: bool = False,
-    work_dir: str = None
+    work_dir: str = None,
+    skip_os: bool = False,
 ) -> tuple[list, str]:
     """
     Run the full multi-phase recon pipeline against a target.
@@ -147,13 +148,16 @@ def run_recon(
     status("Phase 3/5 — Service fingerprint (done in phase 2)")
 
     # ── Phase 4: OS Detection (non-blocking, best-effort) ────────────────────
-    status("Phase 4/5 — OS detection (-O)")
     os_xml = str(work_path / "phase4_os.xml")
-    _run_nmap(
-        ["-O", "--osscan-guess", "--max-os-tries", "1", timing, live_ips],
-        os_xml,
-        "os-detection"
-    )
+    if skip_os:
+        status("Phase 4/5 — OS detection (skipped for speed)")
+    else:
+        status("Phase 4/5 — OS detection (-O)")
+        _run_nmap(
+            ["-O", "--osscan-guess", "--max-os-tries", "1", timing, live_ips],
+            os_xml,
+            "os-detection"
+        )
 
     # Enrich service_targets with OS info if detected
     try:
